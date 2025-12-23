@@ -1,0 +1,334 @@
+Source File 1 : 'pru-spi-master.p' (55 Instructions Generated)
+
+    1 :                   : #include "pru-spi-common.ph"
+    2 :                   : .origin 0
+    3 :                   : .entrypoint START
+    4 :                   : 
+    5 :                   : //#define BITBANG_SPI_FASTEST // allows to obtain a 10MHz symmetrical clock
+    6 :                   : #ifndef BITBANG_SPI_FASTEST
+    7 :                   : #define BITBANG_SPI_CLOCK_SLEEP 4 // a value of 0 gives a bitbang clock of 7.7 MHz. Add here additional sleep time (in 10ns).
+    8 :                   : #endif /* BITBANG_SPI_FASTEST */
+    9 :                   : 
+   10 :                   : #ifdef PRU_SPI_MASTER_USING_PRU_0
+   11 :                   : #define PRU_CONTROL_REGISTER_OFFSET PRU0_CONTROL_REGISTER_OFFSET
+   12 :                   : #else 
+   13 :                   : #define PRU_CONTROL_REGISTER_OFFSET PRU1_CONTROL_REGISTER_OFFSET
+   14 :                   : #endif 
+   15 :                   : 
+   16 :                   : 
+   17 :                   : // these are the pins of the PRU''s own GPIOs that we want to use 
+   18 :                   : // for bitbang SPI.
+   19 :                   : #ifdef PRU_SPI_MASTER_USING_PRU_0
+   20 :                   : #define BITBANG_SPI_CS_R30_PIN 5 /* P9_27 */
+   21 :                   : #define BITBANG_SPI_MISO_R31_PIN 15 /* P8_15*/
+   22 :                   : #define BITBANG_SPI_MOSI_R30_PIN 15 /* P8_11 */
+   23 :                   : #define BITBANG_SPI_SCK_R30_PIN 14 /* P8_12 */
+   24 :                   : #else
+   25 :                   : #error SPI master must be on PRU0 (because of the pinmux settings)
+   26 :                   : #endif
+   27 :                   : 
+   28 :                   : .macro BITBANG_SPI_UNASSERT_CS
+   29 :                   : #ifdef ASSERT_LEVEL_LOW
+   30 :                   :     set r30, BITBANG_SPI_CS_R30_PIN
+   31 :                   : #else
+   32 :                   :     clr r30, BITBANG_SPI_CS_R30_PIN
+   33 :                   : #endif
+   34 :                   : .endm
+   35 :                   : 
+   36 :                   : .macro BITBANG_SPI_ASSERT_CS
+   37 :                   : #ifdef ASSERT_LEVEL_LOW
+   38 :                   :     clr r30, BITBANG_SPI_CS_R30_PIN
+   39 :                   : #else
+   40 :                   :     set r30, BITBANG_SPI_CS_R30_PIN
+   41 :                   : #endif
+   42 :                   : .endm
+   43 :                   : 
+   44 :                   : .macro BITBANG_SPI_TX_RX
+   45 :                   : .mparam data
+   46 :                   :     // r28 is our pointer to the current bit in the input/output word
+   47 :                   :     MOV r28, 0
+   48 :                   : 
+   49 :                   : BITBANG_LOOP:
+   50 :                   :     // 1) set clock low and at the same time write the output bit.
+   51 :                   :     //    Prepare the value to write to r30:
+   52 :                   :     //    read the current value ...
+   53 :                   :     MOV r27, r30
+   54 :                   :     //    ... clear the clock bit (clock low) ...
+   55 :                   :     CLR r27, BITBANG_SPI_SCK_R30_PIN
+   56 :                   :     //    ... copy the leftmost bit from the data to be written ...
+   57 :                   :     COPY_BIT r27, BITBANG_SPI_MOSI_R30_PIN, data, (SPI_WL - 1)
+   58 :                   :     //    ... now that r27 is ready with the clock and data out value,
+   59 :                   :     //        write it to r30 at once
+   60 :                   :     MOV r30, r27
+   61 :                   :     // do some house keeping before sleeping:
+   62 :                   :     //    we shift the input word left, so we discard the 
+   63 :                   :     //    bit we just wrote and we make room for the 
+   64 :                   :     //    incoming bit in data.t0 ...
+   65 :                   :     LSL data, data, 1
+   66 :                   :     // we increment the bit counter here
+   67 :                   :     ADD r28, r28, 1
+   68 :                   :     // 2) wait while holding the clock low
+   69 :                   :     //   DELAY times and NOP have been tweaked using a scope
+   70 :                   :     //   in order to obtain a symmetrical clock
+   71 :                   : #ifdef BITBANG_SPI_FASTEST
+   72 :                   :     DELAY 3
+   73 :                   : #else
+   74 :                   :     MOV r27, r27 // NOP, to make clock symmetric
+   75 :                   :     DELAY 4 + BITBANG_SPI_CLOCK_SLEEP
+   76 :                   : #endif /* BITBANG_SPI_FASTEST */
+   77 :                   :     // 3) clock goes high: this triggers the slave to write its
+   78 :                   :     //    output bit to the MISO line
+   79 :                   :     SET r30, BITBANG_SPI_SCK_R30_PIN
+   80 :                   :     // 4) wait while holding clock high
+   81 :                   : #ifndef BITBANG_SPI_FASTEST
+   82 :                   :     DELAY 1 + BITBANG_SPI_CLOCK_SLEEP
+   83 :                   : #endif /* ifndef BITBANG_SPI_FASTEST */
+   84 :                   :     // 5) we read the input:
+   85 :                   :     // ... and we fill bit 0 with the one we read from r31
+   86 :                   :     COPY_BIT data, 0, r31, BITBANG_SPI_MISO_R31_PIN
+   87 :                   :     QBNE BITBANG_LOOP, r28, SPI_WL
+   88 :                   : 
+   89 :                   :     // always make sure we pull the clock line down when we are done
+   90 :                   :     CLR r30, BITBANG_SPI_SCK_R30_PIN
+   91 :                   : .endm
+   92 :                   : 
+   93 :                   : .macro BUS_MODE_MASTER_TX_RX
+   94 :                   : .mparam buffer, transmitLengthBytes
+   95 :                   :     BITBANG_SPI_ASSERT_CS
+   96 :                   :     /* Short delay, ~2us, to let slave device prepare */
+   97 :                   :     DELAY DELAY_AFTER_CS
+   98 :                   :     MOV reg_transmitted_bytes, 0 // reg_transmitted_bytes counts how many bytes we transmitted
+   99 :                   :     // empty the destination register, so that words shorter than 32bits find it empty
+  100 :                   :     MOV reg_curr_word, 0
+  101 :                   : WRITE_BUFFER_LOOP:
+  102 :                   :     // load one word from memory
+  103 :                   :     LBBO reg_curr_word, buffer, reg_transmitted_bytes, SPI_WL_BYTES
+  104 :                   :     BITBANG_SPI_TX_RX reg_curr_word
+  105 :                   :     //store received word in memory
+  106 :                   :     SBBO reg_curr_word, buffer, reg_transmitted_bytes, SPI_WL_BYTES
+  107 :                   :     // increment pointer
+  108 :                   :     ADD reg_transmitted_bytes, reg_transmitted_bytes, SPI_WL_BYTES
+  109 :                   :     QBLT WRITE_BUFFER_LOOP, transmitLengthBytes, reg_transmitted_bytes
+  110 :                   : RECEIVE_DONE:
+  111 :                   :     BITBANG_SPI_UNASSERT_CS
+  112 :                   : .endm
+  113 :                   : 
+  114 :                   : .macro SIGNAL_ARM_OVER
+  115 :                   :     // reset word count to 0
+  116 :                   :     MOV r28, TRANSMISSION_LENGTH
+  117 :                   :     MOV r27, 0 
+  118 :                   :     SBCO r27, CONST_PRUDRAM, r28, 4
+  119 :                   : .endm
+  120 :                   : 
+  121 :                   : /*
+  122 :                   : .macro GET_CYCLE_COUNTER
+  123 :                   : .mparam out
+  124 :                   :     MOV r27, PRU_CONTROL_REGISTER_OFFSET
+  125 :                   :     LBBO out, r27, 0x000C, 4
+  126 :                   : .endm
+  127 :                   : 
+  128 :                   : .macro CLEAR_CYCLE_COUNTER
+  129 :                   :     MOV r27, PRU_CONTROL_REGISTER_OFFSET
+  130 :                   :     MOV r28, 0
+  131 :                   :     SBBO r28, r27, 0x000C, 4
+  132 :                   : .endm
+  133 :                   : 
+  134 :                   : .macro ENABLE_CYCLE_COUNTER
+  135 :                   :     MOV r28, PRU_CONTROL_REGISTER_OFFSET
+  136 :                   :     // Load content of the control register into r27
+  137 :                   :     LBBO r27, r28, 0, 4
+  138 :                   :     // Enable cycle counter
+  139 :                   :     OR r27, r27, 1 << 3
+  140 :                   :     // Store the new control register value
+  141 :                   :     SBBO r27, r28, 0, 4
+  142 :                   : .endm
+  143 :                   : 
+  144 :                   : .macro WAIT_FOR_TICK
+  145 :                   : WAIT_FOR_TICK_LOOP:
+  146 :                   :     GET_CYCLE_COUNTER r27
+  147 :                   :     MOV r28, CYCLES_PER_TICK
+  148 :                   :     QBGE WAIT_FOR_TICK_LOOP, r27, r28
+  149 :                   :     CLEAR_CYCLE_COUNTER
+  150 :                   : .endm
+  151 :                   : */
+  152 :                   : 
+  153 :                   : START:
+  154 : 0x0000 0x240000fe :     MOV r30, 0 // turn off all outputs
+  155 : 0x0001 0x240002c0 :     MOV r0, PRU_CONTROL_REGISTER_OFFSET
+      : 0x0002 0x24200080 : 
+  156 :                   :     // Set up c24 and c25 offsets with CTBIR register
+  157 :                   :     // Thus C24 points to start of PRU RAM
+  158 : 0x0003 0x1320e0e3 :     OR  r3, r0, 0x20      // CTBIR0
+  159 : 0x0004 0x240000e2 :     MOV r2, 0
+  160 : 0x0005 0xe1002382 :     SBBO r2, r3, 0, 4
+  161 :                   : 
+  162 :                   :     // Enable OCP master port
+  163 : 0x0006 0x91042480 :     LBCO      r0, C4, 4, 4
+  164 : 0x0007 0x1d04e0e0 :     CLR     r0, r0, 4   // Clear SYSCFG[STANDBY_INIT] to enable OCP master port
+  165 : 0x0008 0x81042480 :     SBCO      r0, C4, 4, 4
+  166 :                   : 
+  167 :                   : WAIT_FOR_ARM:
+  168 : 0x0009 0x240804e1 :     GET_PAYLOAD_LENGTH_MASTER r1
+      : 0x000a 0x90e13881 : 
+  169 :                   :     // if there is nothing to send, wait again
+  170 : 0x000b 0x5700e1fe :     QBEQ WAIT_FOR_ARM, r1, 0
+  171 :                   : 
+  172 : 0x000c 0x240000e2 :     GET_PAYLOAD_ADDRESS r2
+      : 0x000d 0x0100e2e2 : 
+  173 :                   : 
+  174 :                   :     // transmit/receive r1 bytes from/in r2
+  175 : 0x000e 0x1d05fefe :     BUS_MODE_MASTER_TX_RX r2, r1
+      : 0x000f 0x240064fb : 
+      : 0x0010 0x0501fbfb : 
+      : 0x0011 0x6f00fbff : 
+      : 0x0012 0x240000e5 : 
+      : 0x0013 0x240000e6 : 
+      : 0x0014 0xf0e52286 : 
+      : 0x0015 0x240000fc : 
+      : 0x0016 0x10fefefb : 
+      : 0x0017 0x1d0efbfb : 
+      : 0x0018 0xc91fe603 : 
+      : 0x0019 0x1f0ffbfb : 
+      : 0x001a 0x79000003 : 
+      : 0x001b 0x1d0ffbfb : 
+      : 0x001c 0x79000001 : 
+      : 0x001d 0x10fbfbfe : 
+      : 0x001e 0x0901e6e6 : 
+      : 0x001f 0x0101fcfc : 
+      : 0x0020 0x10fbfbfb : 
+      : 0x0021 0x240008fb : 
+      : 0x0022 0x0501fbfb : 
+      : 0x0023 0x6f00fbff : 
+      : 0x0024 0x1f0efefe : 
+      : 0x0025 0x240005fb : 
+      : 0x0026 0x0501fbfb : 
+      : 0x0027 0x6f00fbff : 
+      : 0x0028 0xc90fff03 : 
+      : 0x0029 0x1f00e6e6 : 
+      : 0x002a 0x79000003 : 
+      : 0x002b 0x1d00e6e6 : 
+      : 0x002c 0x79000001 : 
+      : 0x002d 0x6f20fce9 : 
+      : 0x002e 0x1d0efefe : 
+      : 0x002f 0xe0e52286 : 
+      : 0x0030 0x0104e5e5 : 
+      : 0x0031 0x4ee5e1e3 : 
+      : 0x0032 0x1f05fefe : 
+  176 :                   : COMMUNICATION_DONE:
+  177 :                   :     // signal ARM that the communication is over
+  178 : 0x0033 0x240804fc :     SIGNAL_ARM_OVER
+      : 0x0034 0x240000fb : 
+      : 0x0035 0x80fc389b : 
+  179 :                   : 
+  180 :                   : 
+  181 :                   :     // and wait again
+  182 : 0x0036 0x7f0000d3 :     QBA WAIT_FOR_ARM
+  183 :                   : 
+
+Source File 2 : 'pru-spi-common.ph' (No Output Generated)
+
+    1 :                   : #ifndef PRU_SPI_COMMON_PH
+    2 :                   : #define PRU_SPI_COMMON_PH
+    3 :                   : 
+    4 :                   : #define PRU_SPI_MASTER_USING_PRU_0
+    5 :                   : #define SPI_WL 32 // word length (bits): 8, 16, 24, 32
+    6 :                   : #define SPI_WL_BYTES (SPI_WL >> 3)
+    7 :                   : #define DELAY_AFTER_CS 100 // in 10ns: sleep after CS to allow the slave to prepare. Set to 1 as a minimum
+    8 :                   : 
+    9 :                   : #define ASSERT_LEVEL_LOW // use ASSERT_LEVEL_HIGH otherwise
+   10 :                   : 
+   11 :                   : // this needs to reflect the PruSpiContext struct
+   12 :                   : #define FIRST_BUFFER 0x0 
+   13 :                   : #define SECOND_BUFFER 0x400
+   14 :                   : #define CURRENT_BUFFER_PTR 0x800
+   15 :                   : #define TRANSMISSION_LENGTH 0x804
+   16 :                   : #define SLAVE_MAX_TRANSMISSION_LENGTH 0x808
+   17 :                   : 
+   18 :                   : 
+   19 :                   : #define PRU0_CONTROL_REGISTER_OFFSET 0x22000
+   20 :                   : #define PRU1_CONTROL_REGISTER_OFFSET 0x24000
+   21 :                   : #define PRU_SPEED 200000000
+   22 :                   : 
+   23 :                   : #define CONST_PRUCFG          C4
+   24 :                   : #define CONST_PRUDRAM        C24
+   25 :                   : #define CONST_PRUSHAREDRAM   C28
+   26 :                   : #define CONST_DDR            C31
+   27 :                   : 
+   28 :                   : // Address for the Constant table Block Index Register (CTBIR)
+   29 :                   : #define CTBIR          0x22020
+   30 :                   : 
+   31 :                   : // Address for the Constant table Programmable Pointer Register 0(CTPPR_0)
+   32 :                   : #define CTPPR_0         0x22028
+   33 :                   : 
+   34 :                   : // Address for the Constant table Programmable Pointer Register 1(CTPPR_1)
+   35 :                   : #define CTPPR_1         0x2202C
+   36 :                   : 
+   37 :                   : #define reg_transmitted_bytes r5
+   38 :                   : #define reg_curr_word r6
+   39 :                   : 
+   40 :                   : .macro COPY_BIT
+   41 :                   : .mparam output_reg, output_bit, input_reg, input_bit
+   42 :                   : QBBC CLEAR_OUTPUT_BIT, input_reg, input_bit
+   43 :                   :     SET output_reg, output_bit
+   44 :                   :     QBA DONE
+   45 :                   : CLEAR_OUTPUT_BIT:
+   46 :                   :     CLR output_reg, output_bit
+   47 :                   :     QBA DONE
+   48 :                   :     DONE:
+   49 :                   : .endm
+   50 :                   : 
+   51 :                   : .macro SET_CLEAR_BIT
+   52 :                   : .mparam output_reg, bit, value
+   53 :                   :     QBNE SET, value, 0
+   54 :                   : CLEAR:
+   55 :                   :     clr output_reg, bit
+   56 :                   :     QBA DONE
+   57 :                   : SET:
+   58 :                   :     set output_reg, bit
+   59 :                   : DONE:
+   60 :                   : .endm
+   61 :                   : 
+   62 :                   : // DELAY: Wait (busy loop) for a specified time
+   63 :                   : // Parameters:
+   64 :                   : //   count: how long to wait, in 10ns increments
+   65 :                   : //          this macr also adds a constant 10ns at the beginning 
+   66 :                   : // Uses registers: r27
+   67 :                   : .macro DELAY
+   68 :                   : .mparam count
+   69 :                   :     MOV r27, count
+   70 :                   : DELAY_LOOP:
+   71 :                   :     SUB r27, r27, 1
+   72 :                   :     QBNE DELAY_LOOP, r27, 0
+   73 :                   : .endm
+   74 :                   : 
+   75 :                   : .macro GET_PAYLOAD_ADDRESS
+   76 :                   : .mparam reg_destination
+   77 :                   :     // the payload is then at address CONST_PRUDRAM + FIRST_BUFFER
+   78 :                   :     MOV reg_destination, 0x0 // CONST_PRUDRAM
+   79 :                   :     ADD reg_destination, reg_destination, FIRST_BUFFER
+   80 :                   : .endm
+   81 :                   : 
+   82 :                   : .macro GET_PAYLOAD_LENGTH_MASTER
+   83 :                   : .mparam reg_destination
+   84 :                   :     // the loader will have placed the number of bytes to transmit
+   85 :                   :     // TRANSMISSION_LENGTH bytes into CONST_PRUDRAM
+   86 :                   :     MOV reg_destination, TRANSMISSION_LENGTH
+   87 :                   :     // load this in r1
+   88 :                   :     LBCO reg_destination, CONST_PRUDRAM, reg_destination, 4
+   89 :                   : .endm
+   90 :                   : 
+   91 :                   : .macro GET_PAYLOAD_LENGTH_SLAVE
+   92 :                   : .mparam reg_destination
+   93 :                   :     // the loader will have placed the number of bytes to transmit
+   94 :                   :     // RECEIVE_LENGTH bytes into CONST_PRUDRAM
+   95 :                   :     MOV reg_destination, SLAVE_MAX_TRANSMISSION_LENGTH
+   96 :                   :     // load this in r1
+   97 :                   :     MOV r30, 0
+   98 :                   :     MOV r30, 0
+   99 :                   :     MOV r30, 0
+  100 :                   :     LBCO reg_destination, CONST_PRUDRAM, reg_destination, 4
+  101 :                   : .endm
+  102 :                   : 
+  103 :                   : #endif
+  104 :                   : 
+
