@@ -67,7 +67,7 @@ impl SPIButton {
         self.scans_pressed = 0;
     }
 
-    fn is_lamp_on(&self) -> bool {
+    pub fn is_lamp_on(&self) -> bool {
         (self.data & SPIButtonState::LampOn as u8) == SPIButtonState::LampOn as u8
     }
 
@@ -79,7 +79,7 @@ impl SPIButton {
         }
     }
 
-    fn do_toggle(&self) -> bool {
+    pub fn do_toggle(&self) -> bool {
         (self.data & SPIButtonState::Toggle as u8) == SPIButtonState::Toggle as u8
     }
 
